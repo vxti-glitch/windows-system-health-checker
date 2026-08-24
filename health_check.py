@@ -18,9 +18,11 @@ Requirements:
 import argparse
 import datetime
 import io
+import json
 import os
 import platform
 import sys
+from pathlib import Path
 
 # Force UTF-8 output so block characters render correctly on all Windows consoles
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -156,12 +158,52 @@ def get_services(limit=15):
     return svcs[:limit]
 
 
+def build_health_findings(cpu, mem, disks):
+    findings = []
+
+    cpu_pct = float(cpu.get("Usage (1s avg)") or 0)
+    if cpu_pct >= 85:
+        findings.append(f"High CPU usage detected: {cpu_pct:.1f}%")
+
+    ram_pct = float(mem.get("ram_pct") or 0)
+    if ram_pct >= 90:
+        findings.append(f"High RAM usage detected: {ram_pct:.1f}%")
+
+    for disk in disks:
+        disk_pct = float(disk.get("pct") or 0)
+        if disk_pct >= 85:
+            findings.append(
+                f"Low disk headroom on {disk.get('device', 'unknown disk')}: {disk_pct:.1f}% used"
+            )
+
+    if not findings:
+        findings.append("No threshold-based health warnings detected.")
+    return findings
+
+
+def collect_snapshot():
+    cpu = get_cpu()
+    mem = get_memory()
+    disks = get_disks()
+    return {
+        "generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "system": get_system_info(),
+        "cpu": cpu,
+        "memory": mem,
+        "disks": disks,
+        "top_processes": get_top_processes(10),
+        "services": get_services(),
+        "findings": build_health_findings(cpu, mem, disks),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Report builder
 # ---------------------------------------------------------------------------
 
-def build_report():
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def build_report(snapshot=None):
+    snapshot = snapshot or collect_snapshot()
+    now = snapshot["generated"]
     lines = []
 
     def add(text=""):
@@ -172,18 +214,24 @@ def build_report():
     add(f"  Generated: {now}")
     add(separator())
 
+    add()
+    add("HEALTH SUMMARY")
+    add(separator("-"))
+    for finding in snapshot["findings"]:
+        add(f"  - {finding}")
+
     # System info
     add()
     add("SYSTEM INFORMATION")
     add(separator("-"))
-    for k, v in get_system_info().items():
+    for k, v in snapshot["system"].items():
         add(f"  {k:<20} {v}")
 
     # CPU
     add()
     add("CPU")
     add(separator("-"))
-    cpu = get_cpu()
+    cpu = snapshot["cpu"]
     add(f"  Physical Cores       {cpu['Physical Cores']}")
     add(f"  Logical Cores        {cpu['Logical Cores']}")
     add(f"  Current Frequency    {cpu['Current Freq']}")
@@ -193,7 +241,7 @@ def build_report():
     add()
     add("MEMORY")
     add(separator("-"))
-    mem = get_memory()
+    mem = snapshot["memory"]
     add(f"  RAM Total            {fmt_bytes(mem['ram_total'])}")
     add(f"  RAM Used             {fmt_bytes(mem['ram_used'])}  {bar(mem['ram_pct'])}")
     add(f"  RAM Available        {fmt_bytes(mem['ram_avail'])}")
@@ -205,7 +253,7 @@ def build_report():
     add()
     add("DISK USAGE")
     add(separator("-"))
-    for d in get_disks():
+    for d in snapshot["disks"]:
         add(f"  {d['device']} ({d['fstype']})  mount: {d['mountpoint']}")
         add(f"    Total: {fmt_bytes(d['total'])}  "
             f"Used: {fmt_bytes(d['used'])}  "
@@ -217,18 +265,18 @@ def build_report():
     add("TOP PROCESSES (by CPU %)")
     add(separator("-"))
     add(f"  {'PID':<8} {'CPU%':<8} {'MEM%':<8} NAME")
-    for p in get_top_processes(10):
+    for p in snapshot["top_processes"]:
         add(f"  {p['pid']:<8} {(p['cpu_percent'] or 0):<8.1f} "
             f"{(p['memory_percent'] or 0):<8.1f} {p['name']}")
 
     # Services (Windows only)
-    svcs = get_services()
+    svcs = snapshot["services"]
     if svcs:
         add()
         add("RUNNING SERVICES (sample, A-Z)")
         add(separator("-"))
         for name in svcs:
-            add(f"  • {name}")
+            add(f"  - {name}")
 
     add()
     add(separator())
@@ -254,12 +302,21 @@ def main():
         "--file", action="store_true",
         help="Write report to file only (skip console output)."
     )
+    parser.add_argument("--json", action="store_true", help="Also write a JSON snapshot.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(__file__).parent,
+        help="Directory for generated reports. Default: script directory.",
+    )
     args = parser.parse_args()
 
-    report = build_report()
+    snapshot = collect_snapshot()
+    report = build_report(snapshot)
 
     show_console = not args.file      # default: show console unless --file
     write_file   = not args.console   # default: write file unless --console
+    args.output.mkdir(parents=True, exist_ok=True)
 
     if show_console:
         print(report)
@@ -267,13 +324,21 @@ def main():
     if write_file:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"health_report_{timestamp}.txt"
-        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+        filepath = args.output / filename
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(report)
         if show_console:
-            print(f"\n[✓] Report saved to: {filepath}")
+            print(f"\n[OK] Report saved to: {filepath}")
         else:
-            print(f"[✓] Report saved to: {filepath}")
+            print(f"[OK] Report saved to: {filepath}")
+
+    if args.json:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        json_path = args.output / f"health_report_{timestamp}.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+            f.write("\n")
+        print(f"[OK] JSON snapshot saved to: {json_path}")
 
 
 if __name__ == "__main__":
