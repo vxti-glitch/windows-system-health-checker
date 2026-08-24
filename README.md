@@ -56,7 +56,7 @@ TOP PROCESSES (by CPU %)
 # Install dependency
 pip install psutil
 
-# Run — prints to console AND saves a timestamped .txt file
+# Run - prints to console AND saves a timestamped .txt file
 python health_check.py
 
 # Console only
@@ -64,6 +64,9 @@ python health_check.py --console
 
 # File only
 python health_check.py --file
+
+# Also write a JSON snapshot to a specific folder
+python health_check.py --json --output reports
 ```
 
 ---
@@ -78,12 +81,19 @@ python health_check.py --file
 | Disks | Per-drive: size, used, free, usage % |
 | Top Processes | Top 10 by CPU %, with PID and memory % |
 | Running Services | Sample of active Windows services (Windows only) |
+| Health Summary | Threshold-based warnings for high CPU, high RAM, and low disk headroom |
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 
 ## Help Desk relevance
 
-This tool automates the data-collection step of a "user says their PC is slow" ticket. Instead of manually opening Task Manager, Disk Management, and System Properties one at a time, this script captures everything in a single run and saves a time-stamped file — useful for before/after comparisons and for attaching to a ticket as supporting documentation.
+This tool automates the data-collection step of a "user says their PC is slow" ticket. Instead of manually opening Task Manager, Disk Management, and System Properties one at a time, this script captures everything in a single run and saves a time-stamped file, useful for before/after comparisons and for attaching to a ticket as supporting documentation.
 
 **Skills:** Python · psutil · Windows system diagnostics · CLI tooling
 
