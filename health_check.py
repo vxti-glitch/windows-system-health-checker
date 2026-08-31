@@ -1,8 +1,8 @@
 """
 windows-system-health-checker
 ------------------------------
-Technician-facing tool that captures a point-in-time snapshot of a Windows
-machine's health: CPU, memory, disk, top processes, running services, and
+Technician-facing tool that captures a point-in-time first-response snapshot of
+CPU, memory, disk, top processes, running services, and
 last boot time.  Output is written to both the console and a timestamped
 .txt report file in the same directory.
 
@@ -16,6 +16,7 @@ Requirements:
 """
 
 import argparse
+import copy
 import datetime
 import io
 import json
@@ -158,30 +159,84 @@ def get_services(limit=15):
     return svcs[:limit]
 
 
-def build_health_findings(cpu, mem, disks):
-    findings = []
+DEFAULT_THRESHOLDS = {"cpu_percent": 85.0, "ram_percent": 90.0, "disk_percent": 85.0}
 
-    cpu_pct = float(cpu.get("Usage (1s avg)") or 0)
-    if cpu_pct >= 85:
-        findings.append(f"High CPU usage detected: {cpu_pct:.1f}%")
 
-    ram_pct = float(mem.get("ram_pct") or 0)
-    if ram_pct >= 90:
-        findings.append(f"High RAM usage detected: {ram_pct:.1f}%")
+def build_observations(cpu, mem, disks, thresholds=None):
+    """Describe threshold crossings without diagnosing system health."""
+    thresholds = thresholds or DEFAULT_THRESHOLDS
+    observations = []
+
+    cpu_value = cpu.get("Usage (1s avg)")
+    if cpu_value is None:
+        observations.append("CPU sample unavailable; no CPU threshold comparison was made.")
+    else:
+        cpu_pct = float(cpu_value)
+        if cpu_pct >= thresholds["cpu_percent"]:
+            observations.append(
+                f"One-second CPU sample was {cpu_pct:.1f}%, above the configured "
+                f"{thresholds['cpu_percent']:.1f}% observation threshold; this sample is not a diagnosis."
+            )
+
+    ram_value = mem.get("ram_pct")
+    if ram_value is None:
+        observations.append("RAM measurement unavailable; no RAM threshold comparison was made.")
+    else:
+        ram_pct = float(ram_value)
+        if ram_pct >= thresholds["ram_percent"]:
+            observations.append(
+                f"Point-in-time RAM use was {ram_pct:.1f}%, above the configured "
+                f"{thresholds['ram_percent']:.1f}% observation threshold; confirm with repeated measurement."
+            )
 
     for disk in disks:
         disk_pct = float(disk.get("pct") or 0)
-        if disk_pct >= 85:
-            findings.append(
-                f"Low disk headroom on {disk.get('device', 'unknown disk')}: {disk_pct:.1f}% used"
+        if disk_pct >= thresholds["disk_percent"]:
+            observations.append(
+                f"Disk use on {disk.get('device', 'unknown disk')} was {disk_pct:.1f}%, above the "
+                f"configured {thresholds['disk_percent']:.1f}% observation threshold."
             )
 
-    if not findings:
-        findings.append("No threshold-based health warnings detected.")
-    return findings
+    if not disks:
+        observations.append("Disk measurements unavailable; no disk threshold comparison was made.")
+    if not observations:
+        observations.append("No configured observation threshold was crossed in this point-in-time snapshot.")
+    return observations
 
 
-def collect_snapshot():
+def safe_share_snapshot(snapshot):
+    """Return a copy with identifying host, storage, process, and service values redacted."""
+    redacted = copy.deepcopy(snapshot)
+    redacted["sharing_mode"] = "safe-share"
+    if "Hostname" in redacted.get("system", {}):
+        redacted["system"]["Hostname"] = "<redacted-host>"
+    if "Processor" in redacted.get("system", {}):
+        redacted["system"]["Processor"] = "<redacted-processor>"
+    disk_names = [str(disk.get("device", "")) for disk in redacted.get("disks", [])]
+    for index, disk in enumerate(redacted.get("disks", []), start=1):
+        disk["device"] = f"<disk-{index}>"
+        disk["mountpoint"] = f"<mount-{index}>"
+    for index, process in enumerate(redacted.get("top_processes", []), start=1):
+        process["pid"] = "<redacted>"
+        process["name"] = f"<process-{index}>"
+    redacted["services"] = [
+        f"<service-{index}>" for index, _ in enumerate(redacted.get("services", []), start=1)
+    ]
+    for index, disk_name in enumerate(disk_names, start=1):
+        if disk_name:
+            redacted["observations"] = [
+                observation.replace(disk_name, f"<disk-{index}>")
+                for observation in redacted.get("observations", [])
+            ]
+    return redacted
+
+
+# Backward-compatible name for callers; returned strings are observations.
+build_health_findings = build_observations
+
+
+def collect_snapshot(thresholds=None):
+    thresholds = thresholds or DEFAULT_THRESHOLDS.copy()
     cpu = get_cpu()
     mem = get_memory()
     disks = get_disks()
@@ -193,7 +248,9 @@ def collect_snapshot():
         "disks": disks,
         "top_processes": get_top_processes(10),
         "services": get_services(),
-        "findings": build_health_findings(cpu, mem, disks),
+        "sample_scope": "Point-in-time snapshot; CPU usage is sampled for one second. Threshold crossings are observations, not a diagnosis.",
+        "thresholds": thresholds,
+        "observations": build_observations(cpu, mem, disks, thresholds),
     }
 
 
@@ -210,15 +267,16 @@ def build_report(snapshot=None):
         lines.append(text)
 
     add(separator())
-    add("  WINDOWS SYSTEM HEALTH REPORT")
+    add("  WINDOWS FIRST-RESPONSE SNAPSHOT REPORT")
     add(f"  Generated: {now}")
     add(separator())
 
     add()
-    add("HEALTH SUMMARY")
+    add("THRESHOLD OBSERVATIONS")
     add(separator("-"))
-    for finding in snapshot["findings"]:
-        add(f"  - {finding}")
+    add(f"  Scope: {snapshot.get('sample_scope', 'Point-in-time observation; not a diagnosis.')}")
+    for observation in snapshot.get("observations", snapshot.get("findings", [])):
+        add(f"  - {observation}")
 
     # System info
     add()
@@ -286,14 +344,30 @@ def build_report(snapshot=None):
     return "\n".join(lines)
 
 
+def write_snapshot_outputs(snapshot, output_dir, *, write_text=True, write_json=False, timestamp=None):
+    """Write selected report formats under an explicit directory and return their paths."""
+    output_dir = Path(output_dir).resolve()
+    timestamp = timestamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    paths = {}
+    if write_text or write_json:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if write_text:
+        text_path = output_dir / f"system_snapshot_{timestamp}.txt"
+        text_path.write_text(build_report(snapshot), encoding="utf-8")
+        paths["text"] = text_path
+    if write_json:
+        json_path = output_dir / f"system_snapshot_{timestamp}.json"
+        json_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+        paths["json"] = json_path
+    return paths
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Windows System Health Checker — generates a technician report."
-    )
+    parser = argparse.ArgumentParser(description="Capture a Windows first-response system snapshot.")
     parser.add_argument(
         "--console", action="store_true",
         help="Print report to console only (skip file output)."
@@ -303,6 +377,10 @@ def main():
         help="Write report to file only (skip console output)."
     )
     parser.add_argument("--json", action="store_true", help="Also write a JSON snapshot.")
+    parser.add_argument("--safe-share", action="store_true", help="Redact identifying host, disk, process, and service values.")
+    parser.add_argument("--cpu-threshold", type=float, default=85.0)
+    parser.add_argument("--ram-threshold", type=float, default=90.0)
+    parser.add_argument("--disk-threshold", type=float, default=85.0)
     parser.add_argument(
         "--output",
         type=Path,
@@ -311,34 +389,27 @@ def main():
     )
     args = parser.parse_args()
 
-    snapshot = collect_snapshot()
+    thresholds = {
+        "cpu_percent": args.cpu_threshold,
+        "ram_percent": args.ram_threshold,
+        "disk_percent": args.disk_threshold,
+    }
+    snapshot = collect_snapshot(thresholds)
+    if args.safe_share:
+        snapshot = safe_share_snapshot(snapshot)
     report = build_report(snapshot)
 
     show_console = not args.file      # default: show console unless --file
     write_file   = not args.console   # default: write file unless --console
-    args.output.mkdir(parents=True, exist_ok=True)
-
     if show_console:
         print(report)
 
-    if write_file:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"health_report_{timestamp}.txt"
-        filepath = args.output / filename
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(report)
-        if show_console:
-            print(f"\n[OK] Report saved to: {filepath}")
-        else:
-            print(f"[OK] Report saved to: {filepath}")
-
-    if args.json:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_path = args.output / f"health_report_{timestamp}.json"
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2)
-            f.write("\n")
-        print(f"[OK] JSON snapshot saved to: {json_path}")
+    paths = write_snapshot_outputs(snapshot, args.output, write_text=write_file, write_json=args.json)
+    if "text" in paths:
+        prefix = "\n" if show_console else ""
+        print(f"{prefix}[OK] Report saved to: {paths['text']}")
+    if "json" in paths:
+        print(f"[OK] JSON snapshot saved to: {paths['json']}")
 
 
 if __name__ == "__main__":

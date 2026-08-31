@@ -1,102 +1,53 @@
-# Windows System Health Checker
+# Windows First-Response System Snapshot
 
- [github.com/vxti-glitch](https://github.com/vxti-glitch)
+A small, explainable Windows CLI that captures a point-in-time support snapshot: system version, one-second CPU sample, memory, disks, top processes, and a sample of running services. Configurable thresholds produce observations for follow-up; they are not diagnoses or proof of good or poor health.
 
-A technician-facing command-line tool that captures a point-in-time health snapshot of a Windows machine and saves it as a timestamped report. Built for the first step of any "my computer is slow" troubleshooting workflow.
+## Run it
 
----
+```powershell
+python -m pip install -r requirements.txt
 
-## Example output
+# Console only; does not write a report directory
+python .\health_check.py --console
 
-```
-============================================================
-  WINDOWS SYSTEM HEALTH REPORT
-  Generated: 2026-08-03 20:15:42
-============================================================
+# Redacted text and JSON files under an explicit directory
+python .\health_check.py --file --json --safe-share --output .\reports
 
-SYSTEM INFORMATION
-------------------------------------------------------------
-  Hostname             DESKTOP-IV1234
-  OS                   Windows 11 10.0.22631
-  Last Boot            2026-08-03 09:01:12
-  Uptime               11h 14m 30s
-
-CPU
-------------------------------------------------------------
-  Physical Cores       8
-  Logical Cores        16
-  Current Frequency    2496 MHz
-  Usage                [████████░░░░░░░░░░░░] 42.0%
-
-MEMORY
-------------------------------------------------------------
-  RAM Total            31.9 GB
-  RAM Used             14.2 GB  [█████████░░░░░░░░░░░] 44.5%
-  RAM Available        17.7 GB
-
-DISK USAGE
-------------------------------------------------------------
-  C:\ (NTFS)  mount: C:\
-    Total: 476.8 GB  Used: 210.3 GB  Free: 266.5 GB
-    [█████████░░░░░░░░░░░] 44.1%
-
-TOP PROCESSES (by CPU %)
-------------------------------------------------------------
-  PID      CPU%     MEM%     NAME
-  4821     8.2      1.1      chrome.exe
-  1204     3.1      0.4      explorer.exe
-  ...
+# Optional observation thresholds
+python .\health_check.py --console --cpu-threshold 80 --ram-threshold 85 --disk-threshold 90
 ```
 
----
+By default the tool prints to the console and writes a timestamped text report. `--file` suppresses console report output; `--console` suppresses the text file. `--json` adds a JSON snapshot.
 
-## Usage
+## How to interpret it
 
-```bash
-# Install dependency
-pip install psutil
+- CPU is a one-second sample. A threshold crossing may justify repeated measurement; it is not a root cause.
+- Memory and disk percentages are point-in-time measurements. Static thresholds do not establish user impact.
+- Process CPU values are short samples and can change immediately.
+- Missing or inaccessible measurements remain unavailable; the tool does not invent a healthy value.
+- A snapshot with no threshold crossings is not a clean bill of health.
 
-# Run - prints to console AND saves a timestamped .txt file
-python health_check.py
+Use the output to record a starting state, compare an authorized before/after test, and decide what evidence to collect next.
 
-# Console only
-python health_check.py --console
+## Privacy and safe sharing
 
-# File only
-python health_check.py --file
+Reports can contain hostname, processor, storage paths, process names/PIDs, and service names. Depending on future extensions or surrounding logs, usernames, IP addresses, installed-software names, internal domains, and other identifiers may also appear. Treat raw reports as sensitive support data.
 
-# Also write a JSON snapshot to a specific folder
-python health_check.py --json --output reports
-```
+`--safe-share` replaces hostname, processor, disk/mount, process/PID, and service identifiers in both text and JSON output. It is a narrow redaction aid, not data-loss prevention: manually review every file before attaching it to a ticket or publishing it. The tool does not currently collect IP addresses, usernames, or an installed-software inventory.
 
----
+## Test and evidence boundary
 
-## What it collects
-
-| Section | Data points |
-|---|---|
-| System | Hostname, OS version, architecture, processor, last boot, uptime |
-| CPU | Core count, frequency, live usage % with ASCII bar |
-| Memory | Total, used, available RAM + swap |
-| Disks | Per-drive: size, used, free, usage % |
-| Top Processes | Top 10 by CPU %, with PID and memory % |
-| Running Services | Sample of active Windows services (Windows only) |
-| Health Summary | Threshold-based warnings for high CPU, high RAM, and low disk headroom |
-
-Run tests:
-
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 
----
+Tests cover unavailable measurements, configurable thresholds as observations, safe-share redaction, report paths, and report rendering. A local `--safe-share` run can prove collection on the current authorized machine at that moment only.
 
-## Help Desk relevance
+[`evidence/README.md`](evidence/README.md) defines the evidence required for a future controlled high-CPU or low-disk before/after lab. It contains no fabricated result.
 
-This tool automates the data-collection step of a "user says their PC is slow" ticket. Instead of manually opening Task Manager, Disk Management, and System Properties one at a time, this script captures everything in a single run and saves a time-stamped file, useful for before/after comparisons and for attaching to a ticket as supporting documentation.
+## Limits
 
-**Skills:** Python · psutil · Windows system diagnostics · CLI tooling
-
----
-
-*Part of the [vxti-glitch IT Support Portfolio](https://github.com/vxti-glitch)*
+- This is a first-response snapshot, not continuous monitoring, benchmarking, asset management, or endpoint administration.
+- It does not determine why a process is busy, why storage is full, whether malware is present, or whether a system is suitable for production.
+- Windows service collection depends on platform support and permissions.
+- No real report is committed; the examples in this README are illustrative.
